@@ -14,10 +14,12 @@ import {
     errorsLaneTarget,
     flattenTaskIds,
     groupValidationIssuesByTask,
+    healDagRemoval,
     rewireDagDependency,
     isFlowableType,
     isWrappedLaneItem,
     isWrapperLane,
+    listLengthAtPath,
     moveBlockAtPath,
     moveBlockToPath,
     nextAvailableId,
@@ -2214,5 +2216,94 @@ tasks:
                 expect(copy.dependsOn).toEqual(["a"])
             })
         })
+
+    describe("healDagRemoval", () => {
+        const DAG = `id: dag
+namespace: qa
+tasks:
+  - id: pipeline
+    type: io.kestra.plugin.core.flow.Dag
+    tasks:
+      - task:
+          id: a
+          type: io.kestra.plugin.core.log.Log
+      - task:
+          id: b
+          type: io.kestra.plugin.core.log.Log
+        dependsOn:
+          - a
+      - task:
+          id: c
+          type: io.kestra.plugin.core.log.Log
+        dependsOn:
+          - b
+      - task:
+          id: d
+          type: io.kestra.plugin.core.log.Log
+        dependsOn:
+          - a
+`
+        const LANE = "tasks[0].tasks"
+        const dagOf = (source: string) => {
+            const lane = flowYamlUtils.parse<DagProbeFlow>(source)!.tasks[0]!.tasks ?? []
+            return Object.fromEntries(lane.map(item => [item.task.id, item.dependsOn ?? null]))
+        }
+
+        it("leaves the remaining dependsOn untouched when a leaf task is removed", () => {
+            // c is a leaf: nothing depends on it, so healing is a no-op.
+            expect(dagOf(healDagRemoval(DAG, LANE, "c"))).toEqual({
+                a: null,
+                b: ["a"],
+                c: ["b"],
+                d: ["a"],
+            })
+        })
+
+        it("rewires a removed task's dependents onto its own dependencies", () => {
+            // b sits in a -> b -> c; c must inherit b's upstream (a).
+            expect(dagOf(healDagRemoval(DAG, LANE, "b"))).toEqual({
+                a: null,
+                b: ["a"],
+                c: ["a"],
+                d: ["a"],
+            })
+        })
+
+        it("changes nothing when the removed task has no dependents", () => {
+            // d is a branch leaf off a; removing it rewires nothing.
+            expect(dagOf(healDagRemoval(DAG, LANE, "d"))).toEqual({
+                a: null,
+                b: ["a"],
+                c: ["b"],
+                d: ["a"],
+            })
+        })
+
+        it("leaves no dependsOn still pointing at the removed id", () => {
+            const healed = healDagRemoval(DAG, LANE, "b")
+            const stillReferencesB = Object.values(dagOf(healed))
+                .filter((deps): deps is string[] => Array.isArray(deps))
+                .some(deps => deps.includes("b"))
+            expect(stillReferencesB).toBe(false)
+        })
+    })
+
+    describe("listLengthAtPath", () => {
+        it("returns the length of a list at a nested path", () => {
+            expect(listLengthAtPath(FLOW_WITH_DAG, "tasks[0].tasks")).toBe(2)
+        })
+
+        it("returns the length of a top-level list", () => {
+            expect(listLengthAtPath(SIMPLE_FLOW, "tasks")).toBe(2)
+        })
+
+        it("returns 0 for a path that does not exist", () => {
+            expect(listLengthAtPath(SIMPLE_FLOW, "triggers")).toBe(0)
+        })
+
+        it("returns 0 when the value at the path is not a list", () => {
+            expect(listLengthAtPath(SIMPLE_FLOW, "tasks[0].id")).toBe(0)
+        })
+    })
     })
 })
